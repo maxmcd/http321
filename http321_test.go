@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -156,9 +157,9 @@ func TestHTTP322_2(t *testing.T) {
 		IdleTimeout: 1 * time.Hour,
 	}
 	handler := h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Println("got request")
 		w.WriteHeader(200)
-		w.(http.Hijacker).Flush()
-		io.Copy(w, r.Body)
+		_, _ = io.Copy(flushWriter{w}, r.Body)
 	}), h2conf)
 	http2Server := &http.Server{
 		Handler: handler,
@@ -179,21 +180,49 @@ func TestHTTP322_2(t *testing.T) {
 	}
 
 	pReader, pWriter := io.Pipe()
-	req, err := http.NewRequest(http.MethodGet, "http://whatever", pReader)
+	req, err := http.NewRequest(http.MethodPost, "http://whatever", io.NopCloser(pReader))
 	if err != nil {
 		t.Fatal(err)
 	}
+	go func() {
+		for {
+			time.Sleep(1 * time.Second)
+			fmt.Fprintf(pWriter, "It is now %v\n", time.Now())
+		}
+	}()
 	fmt.Println("hi")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fmt.Println("did it?")
-	fmt.Fprint(pWriter, "hello hello ")
-	fmt.Println("did it?")
-	bb := make([]byte, len("hello hello "))
-	_, _ = resp.Body.Read(bb)
+	_, _ = io.Copy(os.Stdout, resp.Body)
 
-	fmt.Println(string(bb))
+}
+
+func TestHTTP321(t *testing.T) {
+	listener := NewHTTP3Listener(t)
+	conn := DialListener(t, listener)
+
+	// Accept a client connection.
+	serverConn, err := listener.Accept(context.Background())
+	if err != nil {
+		log.Panicln(err)
+	}
+	defer func() { _ = serverConn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "") }()
+
+	netListener := QuicNetListener{Connection: serverConn}
+
+	http2Listener := &HTTP2OverQuicListener{listener: &netListener}
+
+	client := &http.Client{
+		Transport: &http2.Transport{
+			AllowHTTP: true, // Enable h2c support
+			DialTLSContext: func(ctx context.Context,
+				network, addr string, cfg *tls.Config) (net.Conn, error) {
+				fmt.Println("dialing new conn")
+				return QuicConnDial(conn)
+			},
+		},
+	}
 
 }
