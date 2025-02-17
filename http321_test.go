@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/quic-go/quic-go"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -200,6 +201,48 @@ func TestHTTP322_2(t *testing.T) {
 }
 
 func TestHTTP321(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		listener := NewHTTP3Listener(t)
+		conn := DialListener(t, listener)
+
+		// Accept a client connection.
+		serverConn, err := listener.Accept(context.Background())
+		if err != nil {
+			log.Panicln(err)
+		}
+		defer func() { _ = serverConn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "") }()
+
+		netListener := QuicNetListener{Connection: serverConn}
+		http2Listener := HTTP2OverQuicListener{listener: &netListener}
+
+		go func() {
+			_ = http.Serve(&http2Listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Println("got request http1")
+				fmt.Fprintf(w, "I'm http1!")
+			}))
+		}()
+		client := &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context,
+					network, addr string) (net.Conn, error) {
+					con, err := HTTP2OverQuicDial(conn)
+					return con, err
+				},
+			},
+		}
+		resp, err := client.Get("http://whatever")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println(resp.Body)
+		_, _ = io.Copy(os.Stdout, resp.Body)
+
+		_ = listener.Close()
+		_ = conn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "")
+	}
+}
+
+func TestHTTP_WS(t *testing.T) {
 	listener := NewHTTP3Listener(t)
 	conn := DialListener(t, listener)
 
@@ -211,18 +254,62 @@ func TestHTTP321(t *testing.T) {
 	defer func() { _ = serverConn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "") }()
 
 	netListener := QuicNetListener{Connection: serverConn}
+	http2Listener := HTTP2OverQuicListener{listener: &netListener}
 
-	http2Listener := &HTTP2OverQuicListener{listener: &netListener}
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
 
-	client := &http.Client{
-		Transport: &http2.Transport{
-			AllowHTTP: true, // Enable h2c support
-			DialTLSContext: func(ctx context.Context,
-				network, addr string, cfg *tls.Config) (net.Conn, error) {
-				fmt.Println("dialing new conn")
-				return QuicConnDial(conn)
-			},
+	go func() {
+		_ = http.Serve(&http2Listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// locks here because we don't implement SetReadDeadline and the pending read is never release
+			c, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Logf("upgrade error: %v", err)
+				return
+			}
+			defer c.Close()
+
+			// Echo back any messages received
+			for {
+				mt, message, err := c.ReadMessage()
+				if err != nil {
+					break
+				}
+				if err := c.WriteMessage(mt, message); err != nil {
+					break
+				}
+			}
+		}))
+	}()
+
+	// Create WebSocket client
+	dialer := websocket.Dialer{
+		NetDialContext: func(ctx context.Context,
+			network, addr string) (net.Conn, error) {
+			con, err := HTTP2OverQuicDial(conn)
+			return con, err
 		},
 	}
 
+	ws, _, err := dialer.Dial("ws://whatever", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+
+	// Send a test message
+	if err := ws.WriteMessage(websocket.TextMessage, []byte("hello websocket")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read the response
+	_, msg, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Printf("Received: %s\n", msg)
+
+	listener.Close()
+	_ = conn.CloseWithError(quic.ApplicationErrorCode(quic.NoError), "")
 }

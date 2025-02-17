@@ -2,6 +2,7 @@ package http321
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -13,24 +14,6 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
-
-// type DebugReadWriteCloser struct {
-// 	wrapped io.ReadWriteCloser
-// }
-
-// func (d *DebugReadWriteCloser) Read(p []byte) (n int, err error) {
-// 	defer func() { fmt.Printf("Read bytes: %q\n", string(p[:n])) }()
-// 	return d.wrapped.Read(p)
-// }
-
-// func (d *DebugReadWriteCloser) Write(p []byte) (n int, err error) {
-// 	defer func() { fmt.Printf("Write bytes: %q\n", string(p[:n])) }()
-// 	return d.wrapped.Write(p)
-// }
-
-// func (d *DebugReadWriteCloser) Close() error {
-// 	return d.wrapped.Close()
-// }
 
 // QuicNetListener implements a net.Listener on top of a quic.Connection
 type QuicNetListener struct {
@@ -44,8 +27,8 @@ func (l *QuicNetListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quicListener accept: %w", err)
 	}
-	fmt.Println("new stream on listener")
-	return &ReadWriteConn{Reader: stream, Writer: stream, Closer: stream}, nil
+	// return &ReadWriteConn{Reader: stream, Writer: stream, Closer: stream}, nil
+	return &ReadWriteConn{Reader: &EchoReader{stream}, Writer: &EchoWriter{stream}, Closer: stream}, nil
 }
 
 func (l *QuicNetListener) Close() error {
@@ -82,7 +65,6 @@ type flushWriter struct {
 }
 
 func (fw flushWriter) Write(p []byte) (n int, err error) {
-	fmt.Println("writing", string(p))
 	n, err = fw.w.Write(p)
 	if f, ok := fw.w.(http.Flusher); ok {
 		f.Flush()
@@ -101,22 +83,15 @@ var _ net.Listener = &HTTP2OverQuicListener{}
 
 func (l *HTTP2OverQuicListener) Accept() (net.Conn, error) {
 	l.once.Do(func() {
-		h2conf := &http2.Server{
-			IdleTimeout: 1 * time.Hour,
-		}
+		l.conns = make(chan net.Conn, 1)
 		handler := h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Println("got request")
 			w.WriteHeader(200)
 			pReader, pWriter := io.Pipe()
 			l.conns <- &ReadWriteConn{Reader: r.Body, Writer: pWriter, Closer: r.Body}
 			_, _ = io.Copy(flushWriter{w}, pReader)
-		}), h2conf)
-		http2Server := &http.Server{
-			Handler: handler,
-		}
-		go func() {
-			_ = http2Server.Serve(l.listener)
-		}()
+		}), &http2.Server{})
+		http2Server := &http.Server{Handler: handler}
+		go func() { _ = http2Server.Serve(l.listener) }()
 	})
 	return <-l.conns, nil
 }
@@ -130,4 +105,31 @@ func (l *HTTP2OverQuicListener) Close() error {
 
 func (l *HTTP2OverQuicListener) Addr() net.Addr {
 	return l.listener.Addr()
+}
+
+func HTTP2OverQuicDial(conn quic.Connection) (net.Conn, error) {
+	client := &http.Client{
+		Transport: &http2.Transport{
+			AllowHTTP: true, // Enable h2c support
+			DialTLSContext: func(ctx context.Context,
+				network, addr string, cfg *tls.Config) (net.Conn, error) {
+				return QuicConnDial(conn)
+			},
+		},
+	}
+	inReader, inWriter := io.Pipe()
+	outReader, outWriter := io.Pipe()
+	req, err := http.NewRequest(http.MethodPost, "http://whatever", io.NopCloser(inReader))
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Println("HTTP2OverQuicDial error", err)
+		}
+		_, _ = io.Copy(outWriter, resp.Body)
+	}()
+	time.Sleep(1 * time.Millisecond) // :(
+	return &ReadWriteConn{Reader: outReader, Writer: inWriter, Closer: outReader}, nil
 }
