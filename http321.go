@@ -27,8 +27,8 @@ func (l *QuicNetListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quicListener accept: %w", err)
 	}
-	// return &ReadWriteConn{Reader: stream, Writer: stream, Closer: stream}, nil
-	return &ReadWriteConn{Reader: &EchoReader{stream}, Writer: &EchoWriter{stream}, Closer: stream}, nil
+	return &ReadWriteConn{Reader: stream, Writer: stream, Closer: stream}, nil
+	// return &ReadWriteConn{Reader: &EchoReader{stream}, Writer: &EchoWriter{stream}, Closer: stream}, nil
 }
 
 func (l *QuicNetListener) Close() error {
