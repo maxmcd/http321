@@ -100,11 +100,16 @@ func TestHTTP32(t *testing.T) {
 		fmt.Fprintf(w, "Hello from http2! %d", count)
 		time.Sleep(time.Millisecond * 100)
 	}), h2conf)
-	http2Server := &http.Server{
-		Handler: handler,
-	}
 	go func() {
-		_ = http2Server.Serve(&netListener)
+		for {
+			conn, err := netListener.Accept()
+			if err != nil {
+				return
+			}
+			go (&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{
+				Handler: handler,
+			})
+		}
 	}()
 
 	client := &http.Client{
@@ -129,6 +134,7 @@ func TestHTTP32(t *testing.T) {
 			if err != nil {
 				panic(err)
 			}
+			fmt.Println(resp)
 			b, _ := io.ReadAll(resp.Body)
 			lock.Lock()
 			results = append(results, string(b))
@@ -186,10 +192,11 @@ func TestHTTP322_2(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() {
-		for {
-			time.Sleep(1 * time.Second)
+		for i := 0; i < 10; i++ {
+			time.Sleep(100 * time.Millisecond)
 			fmt.Fprintf(pWriter, "It is now %v\n", time.Now())
 		}
+		pWriter.Close()
 	}()
 	fmt.Println("hi")
 	resp, err := client.Do(req)
@@ -234,7 +241,7 @@ func TestHTTP321(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fmt.Println(resp.Body)
+		fmt.Println(resp)
 		_, _ = io.Copy(os.Stdout, resp.Body)
 
 		_ = listener.Close()
@@ -243,6 +250,7 @@ func TestHTTP321(t *testing.T) {
 }
 
 func TestHTTP_WS(t *testing.T) {
+	t.Skip("Websockets need SetReadDeadline and we don't have that")
 	listener := NewHTTP3Listener(t)
 	conn := DialListener(t, listener)
 

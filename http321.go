@@ -90,8 +90,17 @@ func (l *HTTP2OverQuicListener) Accept() (net.Conn, error) {
 			l.conns <- &ReadWriteConn{Reader: r.Body, Writer: pWriter, Closer: r.Body}
 			_, _ = io.Copy(flushWriter{w}, pReader)
 		}), &http2.Server{})
-		http2Server := &http.Server{Handler: handler}
-		go func() { _ = http2Server.Serve(l.listener) }()
+		go func() {
+			for {
+				conn, err := l.listener.Accept()
+				if err != nil {
+					break
+				}
+				go (&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{
+					Handler: handler,
+				})
+			}
+		}()
 	})
 	return <-l.conns, nil
 }
@@ -130,6 +139,5 @@ func HTTP2OverQuicDial(conn quic.Connection) (net.Conn, error) {
 		}
 		_, _ = io.Copy(outWriter, resp.Body)
 	}()
-	time.Sleep(1 * time.Millisecond) // :(
 	return &ReadWriteConn{Reader: outReader, Writer: inWriter, Closer: outReader}, nil
 }
